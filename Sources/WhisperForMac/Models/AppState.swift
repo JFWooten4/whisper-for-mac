@@ -65,6 +65,7 @@ final class AppState: ObservableObject {
         )
     }
     @Published var selectedFileURL: URL?
+    @Published var creatorVideo: CreatorVideo?
     @Published var selectedModelID = SupportedModels.all.first?.id ?? "tiny"
     @Published var selectedTask: WhisperTask = .transcribe
     @Published var selectedLanguageCode = "auto"
@@ -81,6 +82,7 @@ final class AppState: ObservableObject {
     @Published var wizardStep: WizardStep = .file
 
     private let backend = WhisperBackendService()
+    private let creatorCaptions = CreatorCaptionService()
     private var transcriptionTask: Task<Void, Never>?
     private var activeTranscriptionID: UUID?
 
@@ -125,7 +127,8 @@ final class AppState: ObservableObject {
     }
 
     var canStartTranscription: Bool {
-        selectedFileURL != nil &&
+        if creatorVideo != nil { return !jobState.isBusy }
+        return selectedFileURL != nil &&
             selectedFileError == nil &&
             backendStatus.engineReady &&
             (selectedModelInfo?.isInstalled ?? false) &&
@@ -133,8 +136,11 @@ final class AppState: ObservableObject {
     }
 
     var resolvedOutputDirectory: URL? {
-        guard let selectedFileURL else { return nil }
-        return OutputDirectoryResolver.resolve(for: selectedFileURL, preferences: preferences)
+        if let selectedFileURL {
+            return OutputDirectoryResolver.resolve(for: selectedFileURL, preferences: preferences)
+        }
+        // A YouTube URL has no parent folder on disk. Reuse the configured output location.
+        return creatorVideo == nil ? nil : preferences.customOutputDirectory
     }
 
     var installedModelCount: Int {
@@ -150,7 +156,8 @@ final class AppState: ObservableObject {
     }
 
     var canReviewOptions: Bool {
-        canChooseFile && selectedFileURL != nil && selectedFileError == nil
+        if creatorVideo != nil { return !jobState.isBusy }
+        return canChooseFile && selectedFileURL != nil && selectedFileError == nil
     }
 
     var homeState: HomeFlowState {
@@ -198,7 +205,7 @@ final class AppState: ObservableObject {
         case .setup:
             return backendStatus.installedModelsAvailable ? "Choose the model you want to use for this transcript." : "Install a model once, then drag in a file and start."
         case .readyForFile:
-            return "Your model is ready. Choose a local audio or video file to continue."
+            return "Choose a local recording or download creator-authored captions from a YouTube video."
         case .readyToRun:
             return "Task, language, and output defaults are ready. Start when the summary looks right."
         case .running:
@@ -265,6 +272,7 @@ final class AppState: ObservableObject {
         guard let error = MediaFileValidator.validate(url) else {
             resetResultIfNeeded()
             selectedFileURL = url
+            creatorVideo = nil
             transientErrorMessage = nil
             if !jobState.isBusy {
                 jobState = .idle
@@ -282,12 +290,28 @@ final class AppState: ObservableObject {
         wizardStep = .file
     }
 
+    func chooseCreatorVideo(_ input: String) {
+        guard let video = CreatorVideo.parse(input) else {
+            transientErrorMessage = "Enter a valid YouTube video URL or 11-character video ID."
+            return
+        }
+        resetResultIfNeeded()
+        selectedFileURL = nil
+        creatorVideo = video
+        transientErrorMessage = nil
+        selectedLanguageCode = "auto"
+        if !jobState.isBusy { jobState = .idle }
+        // Creator captions do not require a Whisper model or audio language recognition.
+        wizardStep = .language
+    }
+
     func chooseAnotherFile() {
         resetForNextFileSelection()
     }
 
     func resetForNextFileSelection() {
         selectedFileURL = nil
+        creatorVideo = nil
         transientErrorMessage = nil
         lastOutputURLs = []
         currentTranscriptionStartedAt = nil
@@ -309,6 +333,10 @@ final class AppState: ObservableObject {
     }
 
     func runTranscription() {
+        if let creatorVideo {
+            downloadCreatorCaptions(video: creatorVideo)
+            return
+        }
         guard
             canStartTranscription,
             let selectedFileURL,
@@ -361,6 +389,58 @@ final class AppState: ObservableObject {
                 currentTranscriptionStartedAt = nil
                 jobState = .succeeded(outputURLs: outputURLs)
                 NSWorkspace.shared.activateFileViewerSelecting(outputURLs)
+            } catch is CancellationError {
+                guard activeTranscriptionID == transcriptionID else { return }
+                markTranscriptionCancelled()
+            } catch {
+                guard activeTranscriptionID == transcriptionID else { return }
+                currentTranscriptionStartedAt = nil
+                lastTranscriptionDuration = nil
+                transientErrorMessage = error.localizedDescription
+                jobState = .failed(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func downloadCreatorCaptions(video: CreatorVideo) {
+        guard !jobState.isBusy,
+              let outputAccess = ensureOutputDirectoryAccess(promptIfNeeded: true, showCancellationError: true)
+        else { return }
+
+        let startedAt = Date()
+        let transcriptionID = UUID()
+        let formats = preferences.outputFormats
+        let languageCode = selectedLanguageCode
+        jobState = .running(progressText: "Downloading creator-authored subtitles", fraction: nil)
+        currentTranscriptionStartedAt = startedAt
+        lastTranscriptionDuration = nil
+        transientErrorMessage = nil
+        wizardStep = .progress
+        activeTranscriptionID = transcriptionID
+
+        transcriptionTask = Task { [video, formats, languageCode, outputAccess, startedAt, transcriptionID] in
+            defer {
+                outputAccess.invalidate()
+                if activeTranscriptionID == transcriptionID {
+                    transcriptionTask = nil
+                    activeTranscriptionID = nil
+                }
+            }
+
+            do {
+                let urls = try await creatorCaptions.download(
+                    video: video,
+                    languageCode: languageCode,
+                    formats: formats,
+                    outputDirectory: outputAccess.url
+                )
+                try Task.checkCancellation()
+                guard activeTranscriptionID == transcriptionID else { return }
+                lastOutputURLs = urls
+                lastTranscriptionDuration = max(0, Date().timeIntervalSince(startedAt))
+                currentTranscriptionStartedAt = nil
+                jobState = .succeeded(outputURLs: urls)
+                NSWorkspace.shared.activateFileViewerSelecting(urls)
             } catch is CancellationError {
                 guard activeTranscriptionID == transcriptionID else { return }
                 markTranscriptionCancelled()
@@ -637,6 +717,8 @@ final class AppState: ObservableObject {
     private func syncWizardStepToCurrentState() {
         if jobState.isBusy || jobState.isTerminal {
             wizardStep = .progress
+        } else if creatorVideo != nil {
+            wizardStep = .language
         } else if selectedFileURL == nil {
             wizardStep = .file
         } else if !backendStatus.installedModelsAvailable {

@@ -17,10 +17,10 @@ struct JobProgressSection: View {
             case .idle, .awaitingConfirmation:
                 idleState
             case .preparing:
-                runningState(title: "Preparing the backend", detail: "Checking the model and extracting audio samples.")
+                runningState(title: "Preparing", detail: "Preparing the selected subtitle source.")
             case let .running(text, fraction):
                 runningState(
-                    title: "Transcribing audio",
+                    title: appState.creatorVideo == nil ? "Transcribing audio" : "Downloading creator subtitles",
                     detail: text,
                     fraction: displayedFraction(fallingBackTo: fraction)
                 )
@@ -121,7 +121,7 @@ struct JobProgressSection: View {
                     .foregroundStyle(Color(nsColor: .systemGreen))
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Transcript finished successfully.")
+                    Text(appState.creatorVideo == nil ? "Transcript finished successfully." : "Creator subtitles downloaded successfully.")
                         .font(.headline)
                         .foregroundStyle(.primary)
 

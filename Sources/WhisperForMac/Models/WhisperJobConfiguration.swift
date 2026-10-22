@@ -16,7 +16,7 @@ enum WhisperTask: String, CaseIterable, Identifiable {
     }
 }
 
-enum OutputFormat: String, CaseIterable, Identifiable, Codable {
+enum OutputFormat: String, CaseIterable, Identifiable, Codable, Sendable {
     case txt
     case vtt
 
