@@ -3,6 +3,7 @@ import SwiftUI
 struct MainView: View {
     @EnvironmentObject private var appState: AppState
     let isWindowActive: Bool
+    @State private var creatorURLInput = ""
 
     private let sidebarWidth: CGFloat = 190
     private let contentWidth: CGFloat = 404
@@ -82,12 +83,12 @@ struct MainView: View {
                     Spacer()
 
                     Button("Continue") {
-                        appState.wizardStep = .model
+                        appState.wizardStep = appState.creatorVideo == nil ? .model : .language
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(appState.selectedFileURL == nil)
+                    .disabled(appState.selectedFileURL == nil && appState.creatorVideo == nil)
                 }
             }
         case .model:
@@ -121,7 +122,7 @@ struct MainView: View {
             } footer: {
                 HStack(spacing: 12) {
                     Button("Back") {
-                        appState.wizardStep = .model
+                        appState.wizardStep = appState.creatorVideo == nil ? .model : .file
                     }
                     .buttonStyle(.borderless)
                     .font(.system(size: 16))
@@ -154,7 +155,7 @@ struct MainView: View {
                     Spacer()
 
                     Button(action: { appState.runTranscription() }) {
-                        Label("Start Transcription", systemImage: "play.fill")
+                        Label(appState.creatorVideo == nil ? "Start Transcription" : "Download Creator Subtitles", systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
@@ -170,7 +171,7 @@ struct MainView: View {
                     HStack(spacing: 12) {
                         Spacer()
 
-                        Button("Transcribe Another File") {
+                        Button("Start Another Transcript") {
                             appState.chooseAnotherFile()
                         }
                         .buttonStyle(.borderedProminent)
@@ -275,23 +276,48 @@ struct MainView: View {
 
     private var fileStepContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !appState.backendStatus.installedModelsAvailable {
-                blockedStep(
-                    title: "Install a model first",
-                    detail: "Once a model is ready, this step unlocks drag and drop plus quick Finder selection."
-                )
+            if let video = appState.creatorVideo {
+                optionsSection(
+                    title: "Creator-authored subtitles",
+                    detail: "Download the original caption tracks without replacing them with an AI transcription."
+                ) {
+                    Text(video.url.absoluteString)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                    Text("Formats: " + appState.outputFormatsSummary)
+                        .foregroundStyle(.secondary)
+                    Button("Choose Another Source") { appState.chooseAnotherFile() }
+                        .buttonStyle(.borderless)
+                }
             } else if let fileURL = appState.selectedFileURL {
                 fileSummary(fileURL)
-
-                Button("Choose Another File") {
-                    appState.chooseAnotherFile()
-                }
-                .buttonStyle(.borderless)
+                Button("Choose Another File") { appState.chooseAnotherFile() }
+                    .buttonStyle(.borderless)
             } else {
-                DropZoneView(
-                    onSelectFile: { appState.showFileImporter = true },
-                    onDropFile: { appState.chooseFile($0) }
-                )
+                if appState.backendStatus.installedModelsAvailable {
+                    DropZoneView(
+                        onSelectFile: { appState.showFileImporter = true },
+                        onDropFile: { appState.chooseFile($0) }
+                    )
+                } else {
+                    blockedStep(
+                        title: "Install a model to transcribe local files",
+                        detail: "Downloading original YouTube captions does not require a model."
+                    )
+                }
+
+                optionsSection(
+                    title: "YouTube creator subtitles",
+                    detail: "Use a YouTube video URL or video ID. Only original uploaded subtitles are downloaded."
+                ) {
+                    TextField("YouTube URL or video ID", text: $creatorURLInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { appState.chooseCreatorVideo(creatorURLInput) }
+                    Button("Use YouTube Video") {
+                        appState.chooseCreatorVideo(creatorURLInput)
+                    }
+                    .disabled(creatorURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
 
                 if let error = appState.transientErrorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -504,7 +530,8 @@ struct MainView: View {
     }
 
     private var canConfigureOptions: Bool {
-        appState.selectedFileURL != nil && appState.selectedInstalledModelInfo != nil
+        appState.creatorVideo != nil ||
+            (appState.selectedFileURL != nil && appState.selectedInstalledModelInfo != nil)
     }
 
     private var sidebarProgressFraction: Double? {
